@@ -162,7 +162,7 @@ class DOMAIN_ACCOUNT_F(Structure):
         ('MaxPasswordAge','<Q=0'),
         ('MinPasswordAge','<Q=0'),
         ('ForceLogoff','<Q=0'),
-        ('LockoutDuration','<Q=0'),
+        ('LockoutDuration','<q=0'),
         ('LockoutObservationWindow','<Q=0'),
         ('ModifiedCountAtLastPromotion','<Q=0'),
         ('NextRid','<L=0'),
@@ -179,6 +179,40 @@ class DOMAIN_ACCOUNT_F(Structure):
 # Commenting this, not needed and not present on Windows 2000 SP0
 #        ('Key1',':', SAM_KEY_DATA),
 #        ('Unknown4','<L=0'),
+    )
+
+class DOMAIN_ACCOUNT_V(Structure):
+    structure = (
+        ('Randomstuffforfun','<L=0'),
+        ('SystemSid', ':', lambda data: data[-12:]),
+        ('Data',':'),
+    )
+
+class USER_ACCOUNT_C(Structure):
+    structure = (
+        ('GroupNumber','<L=0'),
+        ('Unknown','436s=b""'),
+        ('GroupMembers',':'),
+    )
+
+class USER_ACCOUNT_F(Structure):
+    structure = (
+        ('Unknown','8s=b""'),
+        ('LastLogonTimestamp','8s=b""'),
+        ('Unknown2','8s=b""'),
+        ('PasswordLastSetTimeStamp','8s=b""'),
+        ('AccountExpiresTimeStamp','8s=b""'),
+        ('LastIncorrectPasswordTimestamp','8s=b""'),
+        ('UserNumber','<L=0'),
+        ('Unknown3','<L=0'),
+        ('GroupedData','H=0'),
+        ('Unknown4','<H=0'),
+        ('CountryCode','<H=0'),
+        ('Unknown5','<H=0'),
+        ('InvalidPWDCount','<H=0'),
+        ('NumberOfLogons','<H=0'),
+        ('Unknown6','<L=0'),
+        ('Unknown7','8s=b""')
     )
 
 # Great help from here https://web.archive.org/web/20190717124313/http://www.beginningtoseethelight.org/ntsecurity/index.htm
@@ -225,6 +259,21 @@ class USER_ACCOUNT_V(Structure):
         ('Unknown14','<L=0'),
         ('Unknown15','24s=b""'),
         ('Data',':=b""'),
+    )
+
+class BUILTIN_GROUP_C(Structure):
+    structure = (
+        ('Unknown1', '<16s=b""'),  # First 16 bytes of unknown data
+        ('NameOffset', '<L=0'),    # Offset for the group name
+        ('NameLength', '<L=0'),    # Length of the group name
+        ('Unknown2', '<L=0'),      # Padding or unused data
+        ('CommentOffset', '<L=0'), # Offset for the group comment
+        ('CommentLength', '<L=0'), # Length of the group comment
+        ('Unknown3', '<L=0'),      # Padding or unused data
+        ('UsersOffset', '<L=0'),   # Offset for users
+        ('Unknown4', '<L=0'),      # Padding or unused data
+        ('UserCount', '<L=0'),     # Number of users
+        ('Data', ':'),             # Remaining data
     )
 
 class NL_RECORD(Structure):
@@ -477,7 +526,7 @@ class RemoteOperations:
         drs = drsuapi.DRS_EXTENSIONS_INT()
         drs['cb'] = len(drs) #- 4
         drs['dwFlags'] = drsuapi.DRS_EXT_GETCHGREQ_V6 | drsuapi.DRS_EXT_GETCHGREPLY_V6 | drsuapi.DRS_EXT_GETCHGREQ_V8 | \
-                         drsuapi.DRS_EXT_STRONG_ENCRYPTION
+                         drsuapi.DRS_EXT_STRONG_ENCRYPTION | drsuapi.DRS_EXT_NONDOMAIN_NCS
         drs['SiteObjGuid'] = drsuapi.NULLGUID
         drs['Pid'] = 0
         drs['dwReplEpoch'] = 0
@@ -1233,7 +1282,7 @@ class RemoteOperations:
 
         return remoteFileName
 
-    def createSSandDownload(self, volume, localPath):
+    def createSSandDownloadWMI(self, volume, localPath, NTDS=False):
         LOG.info('Creating SS')
         ssID = self.__wmiCreateShadow(volume)
         LOG.info('Getting SMB equivalent PATH to access remotely the SS')
@@ -1246,7 +1295,12 @@ class RemoteOperations:
                  ('%s/SYSTEM' % localPath, '%s\\System32\\config\\SYSTEM' % gmtSMBPath),
                  ('%s/SECURITY' % localPath, '%s\\System32\\config\\SECURITY' % gmtSMBPath)]
 
+        if NTDS:
+            LOG.debug('Adding NTDS Path')
+            paths.append(('%s/ntds.dit' % localPath, '%s\\NTDS\\ntds.dit' % gmtSMBPath))
+
         for p in paths:
+            LOG.debug("Downloading Remote path: %s to -> %s" % (p[1], p[0]))
             with open(p[0], 'wb') as local_file:
                 self.__smbConnection.getFile('ADMIN$', p[1], local_file.write)
 
@@ -1290,13 +1344,31 @@ class CryptoCommon:
             plainText += aes256.decrypt(cipherBuffer)
 
         return plainText
+    
+    @staticmethod
+    def encryptAES(key, value, iv=b'\x00'*16):
+        cipherText = b''
+        if iv != b'\x00'*16:
+            aes256 = AES.new(key,AES.MODE_CBC, iv)
+        
+        # Pad input to 16 bytes using PKCS7
+        pad = 16 - (len(value) % 16)
+        value += bytes([pad]*pad)
+        
+        for index in range(0, len(value), 16):
+            if iv == b'\x00'*16:
+                aes256 = AES.new(key,AES.MODE_CBC, iv)
+            plainBuffer = value[index:index+16]
+            cipherText += aes256.encrypt(plainBuffer)
+        
+        return cipherText
 
 
 class OfflineRegistry:
     def __init__(self, hiveFile = None, isRemote = False):
         self.__hiveFile = hiveFile
         if self.__hiveFile is not None:
-            self.__registryHive = winregistry.Registry(self.__hiveFile, isRemote)
+            self.__registryHive = winregistry.get_registry_parser(self.__hiveFile, isRemote)
 
     def enumKey(self, searchKey):
         parentKey = self.__registryHive.findKey(searchKey)
@@ -1325,6 +1397,14 @@ class OfflineRegistry:
             return
 
         return value
+    
+    def setValue(self, keyValue, dataValue):
+        value = self.__registryHive.setValue(keyValue, dataValue)
+
+        if value is None:
+            return
+        
+        return value
 
     def getClass(self, className):
         value = self.__registryHive.getClass(className)
@@ -1340,14 +1420,46 @@ class OfflineRegistry:
             self.__registryHive.close()
 
 class SAMHashes(OfflineRegistry):
-    def __init__(self, samFile, bootKey, isRemote = False, perSecretCallback = lambda secret: _print_helper(secret)):
+    def __init__(self, samFile, bootKey, isRemote = False, printUserStatus=False, perSecretCallback = lambda secret: _print_helper(secret)):
         OfflineRegistry.__init__(self, samFile, isRemote)
         self.__samFile = samFile
         self.__hashedBootKey = b''
         self.__bootKey = bootKey
+        self.__printUserStatus = printUserStatus
         self.__cryptoCommon = CryptoCommon()
         self.__itemsFound = {}
         self.__perSecretCallback = perSecretCallback
+
+    def binary_to_sid(self, binary_data, without_prefix=False):
+        if len(binary_data) < 12:
+            return ""
+
+        if len(binary_data) == 12:
+            if not without_prefix:
+                rev = binary_data[0]
+                authid = hexlify(binary_data[2:8]).decode().lstrip("0")
+                sub = unpack("<L", binary_data[8:12])[0]
+                return f"S-{rev}-{authid}-{sub}"
+            else:
+                sections = [binary_data[i:i + 4][::-1] for i in range(0, 12, 4)]
+                decimals = [int.from_bytes(section, byteorder='big') for section in sections]
+                return f"S-1-5-21-{decimals[0]}-{decimals[1]}-{decimals[2]}"
+
+        if len(binary_data) > 12:
+            rev = binary_data[0]
+            authid = hexlify(binary_data[2:8]).decode().lstrip("0")
+            sub = "-".join(map(str, unpack("<LLLL", binary_data[8:24])))
+            rid = unpack("<L", binary_data[24:28])[0]
+            return f"S-{rev}-{authid}-{sub}-{rid}"
+
+        return ""
+
+    def nt_time_to_datetime(self, nt_time):
+        # NT Time is in 100-nanosecond intervals since 1601-01-01 (UTC)
+        # The difference between 1601 and 1970 is 11644473600 seconds
+        nt_time = int.from_bytes(nt_time, byteorder='little')  # Convert byte string to integer
+        unix_time = (nt_time - 116444736000000000) // 10000000  # Convert to Unix time (seconds)
+        return datetime.utcfromtimestamp(unix_time)
 
     def MD5(self, data):
         md5 = hashlib.new('md5')
@@ -1401,6 +1513,31 @@ class SAMHashes(OfflineRegistry):
         decryptedHash = Crypt1.decrypt(key[:8]) + Crypt2.decrypt(key[8:])
 
         return decryptedHash
+    
+    def __encryptHash(self, rid, plaintextHash, salt, constant, newStyle = False):
+        # Section 2.2.11.1.1 Encrypting an NT or LM Hash Value with a Specified Key
+        # plus hashedBootKey stuff (as well)
+        Key1,Key2 = self.__cryptoCommon.deriveKey(rid)
+
+        Crypt1 = DES.new(Key1, DES.MODE_ECB)
+        Crypt2 = DES.new(Key2, DES.MODE_ECB)
+
+        key = Crypt1.encrypt(plaintextHash[:8]) + Crypt2.encrypt(plaintextHash[8:])
+
+        if newStyle is False:
+            rc4Key = self.MD5( self.__hashedBootKey[:0x10] + pack("<L",rid) + constant )
+            rc4 = ARC4.new(rc4Key)
+            encryptedHash = rc4.encrypt(key)
+        else:
+            encryptedHash = self.__cryptoCommon.encryptAES(self.__hashedBootKey[:0x10], key, salt)
+
+        return encryptedHash
+    
+    def __replaceValue(self, obj, offset, value):
+        obj = bytearray(obj)
+        for i, v in enumerate(value):
+            obj[offset + i] = v
+        return bytes(obj)
 
     def dump(self):
         NTPASSWORD = b"NTPASSWORD\0"
@@ -1423,13 +1560,89 @@ class SAMHashes(OfflineRegistry):
         except:
             pass
 
+        F = self.getValue(ntpath.join(r'SAM\Domains\Account','F'))[1]
+        domainData = DOMAIN_ACCOUNT_F(F)
+        LockoutThreshold = domainData['LockoutThreshold']
+        LockoutDuration = domainData['LockoutDuration']
+        LockoutDurationMinutes = timedelta(microseconds=abs(LockoutDuration) // 10).total_seconds() / 60
+
+        V = self.getValue(ntpath.join(r'SAM\Domains\Account','V'))[1]
+        domainDataV = DOMAIN_ACCOUNT_V(V)
+        system_sid = self.binary_to_sid(domainDataV['SystemSid'], without_prefix=True)
+
+        groups_root = r'SAM\Domains\Builtin\Aliases'
+        groups = OrderedDict()
+
+        for entry in self.enumKey(groups_root):
+            if not entry.startswith("00000"):
+                continue
+
+            data = self.getValue(ntpath.join(groups_root, entry, 'C'))[1]
+            group_data = BUILTIN_GROUP_C(data)
+
+            name_offset = group_data['NameOffset']
+            name_length = group_data['NameLength']
+            groupname = group_data['Data'][name_offset:name_offset + name_length].decode('utf-16')
+            user_count = group_data['UserCount']
+
+            groups[groupname] = {
+                'Group Name': groupname,
+                'User Count': user_count,
+                'Members': []
+            }
+
+            try:
+                new_offset = 0
+                for _ in range(500):  # Check a maximum of 500 members
+                    offset = group_data['UsersOffset'] + 52 + new_offset
+                    entry_type = unpack("<L", data[offset:offset + 4])[0]
+
+                    if entry_type in (257, 1281):
+                        sid_length = 12 if entry_type == 257 else 28
+                        sid = self.binary_to_sid(data[offset:offset + sid_length])
+                        groups[groupname]['Members'].append(sid)
+                        new_offset += sid_length
+
+            except Exception:
+                if not groups[groupname]['Members']:
+                    groups[groupname]['Members'] = ['No users in this group']
+
+        local_admins = [
+            member.strip()
+            for group in groups.values()
+            if group['Group Name'] == 'Administrators'
+            for member in group['Members']
+            if member.strip()
+        ]
+
         for rid in rids:
-            userAccount = USER_ACCOUNT_V(self.getValue(ntpath.join(usersKey,rid,'V'))[1])
-            rid = int(rid,16)
+            disabled = locked_out = auto_locked = is_admin = False
+
+            userAccountF = USER_ACCOUNT_F(self.getValue(ntpath.join(usersKey, rid, 'F'))[1])
+            InvalidPWDCount = userAccountF['InvalidPWDCount']
+            LastIncorrectPasswordTimestamp = userAccountF['LastIncorrectPasswordTimestamp']
+            LastIncorrectPasswordTimestamp_datetime = self.nt_time_to_datetime(LastIncorrectPasswordTimestamp)
+            UserNumber = userAccountF['UserNumber']
+            user_sid = f"{system_sid}-{UserNumber}"
+
+            is_admin = user_sid in local_admins
+            locked = InvalidPWDCount >= LockoutThreshold
+
+            if locked:  # Let's check if the LockoutDuration has passed.
+                lockout_expiry_time = LastIncorrectPasswordTimestamp_datetime + timedelta(minutes=LockoutDurationMinutes)
+                now = datetime.utcnow()
+                locked = now < lockout_expiry_time  # Compare current time with lockout expiry
+
+            grouped_data = userAccountF['GroupedData']
+            disabled = bool(grouped_data & 0x0001)
+            auto_locked = bool(grouped_data & 0x0400)
+            locked_out = locked
+
+            userAccount = USER_ACCOUNT_V(self.getValue(ntpath.join(usersKey, rid, 'V'))[1])
+            rid = int(rid, 16)
 
             V = userAccount['Data']
-
-            userName = V[userAccount['NameOffset']:userAccount['NameOffset']+userAccount['NameLength']].decode('utf-16le')
+            userName = V[userAccount['NameOffset']:userAccount['NameOffset'] + userAccount['NameLength']].decode('utf-16le')
 
             if userAccount['NTHashLength'] == 0:
                 logging.debug('The account %s doesn\'t have hash information.' % userName)
@@ -1467,6 +1680,130 @@ class SAMHashes(OfflineRegistry):
                 ntHash = ntlm.NTOWFv1('','')
 
             answer =  "%s:%d:%s:%s:::" % (userName, rid, hexlify(lmHash).decode('utf-8'), hexlify(ntHash).decode('utf-8'))
+
+            if self.__printUserStatus is True:
+                answer = f"{answer} (Enabled={'False' if disabled else 'True'}) (Locked={'True' if locked_out or auto_locked else 'False'}) (Admin={'True' if is_admin else 'False'})"
+
+            self.__itemsFound[rid] = answer
+            self.__perSecretCallback(answer)
+    
+    def edit(self, user, newNTHash, newLMHash=b''):
+        NTPASSWORD = b"NTPASSWORD\0"
+        LMPASSWORD = b"LMPASSWORD\0"
+
+        if self.__samFile is None:
+            # No SAM file provided
+            return
+
+        LOG.info('Editing local SAM hash for user "%s"' % user)
+        self.getHBootKey()
+
+        usersKey = 'SAM\\Domains\\Account\\Users'
+
+        # Enumerate all the RIDs
+        rids = self.enumKey(usersKey)
+        # Remove the Names item
+        try:
+            rids.remove('Names')
+        except:
+            pass
+
+        # Iterate through RIDs
+        for rid in rids:
+            userAccount = USER_ACCOUNT_V(self.getValue(ntpath.join(usersKey,rid,'V'))[1])
+            _rid = rid
+            rid = int(rid,16)
+
+            V = userAccount['Data']
+
+            userName = V[userAccount['NameOffset']:userAccount['NameOffset']+userAccount['NameLength']].decode('utf-16le')
+
+            # Check for requested user
+            if(userName.casefold() == user.casefold()):
+                LOG.debug('Located rid for "%s": %d' % (user, rid))
+            else:
+                continue
+
+            # User has no hash data
+            if userAccount['NTHashLength'] == 0:
+                logging.error('SAM hashes change for user %s failed. The account doesn\'t have hash information.' % userName)
+                return
+            
+            # Retrieve old hashes to parse hash parameters and display values before the change
+            encNTHash = b''
+            if V[userAccount['NTHashOffset']:][2:3] == b'\x01':
+                # Old Style hashes
+                newStyle = False
+                if userAccount['LMHashLength'] == 20:
+                    encLMHash = SAM_HASH(V[userAccount['LMHashOffset']:][:userAccount['LMHashLength']])
+                if userAccount['NTHashLength'] == 20:
+                    encNTHash = SAM_HASH(V[userAccount['NTHashOffset']:][:userAccount['NTHashLength']])
+            else:
+                # New Style hashes
+                newStyle = True
+                if userAccount['LMHashLength'] == 24:
+                    encLMHash = SAM_HASH_AES(V[userAccount['LMHashOffset']:][:userAccount['LMHashLength']])
+                encNTHash = SAM_HASH_AES(V[userAccount['NTHashOffset']:][:userAccount['NTHashLength']])
+
+            LOG.debug('NewStyle hashes is: %s' % newStyle)
+            LOG.debug('LMHashLength: %d - NTHashLength: %d' % (userAccount['LMHashLength'], userAccount['NTHashLength']))
+            if userAccount['LMHashLength'] >= 20:
+                lmHash = self.__decryptHash(rid, encLMHash, LMPASSWORD, newStyle)
+            else:
+                lmHash = b''
+                newLMHash = b''
+
+            if encNTHash != b'':
+                ntHash = self.__decryptHash(rid, encNTHash, NTPASSWORD, newStyle)
+            else:
+                ntHash = b''
+                newNTHash = b''
+            
+            userChanged = False
+            if newLMHash != b'':
+                encLMHash['Hash'] = self.__encryptHash(rid, newLMHash, encLMHash['Salt'], LMPASSWORD, newStyle)
+                if userAccount['LMHashLength'] != len(encLMHash.getData()):
+                    LOG.error('Mistaching LM lengths received.')
+                    LOG.info('User probably has an empty password. Unable to set new LM hash.')
+                    LOG.debug('Received: %d - Expected: %d' % (userAccount['LMHashLength'], len(encLMHash.getData())))
+                    newLMHash = b''
+                    # Missing LM data is unlikely to be a failure scenario, keep going
+                else:
+                    userAccount['Data'] = self.__replaceValue(V, userAccount['LMHashOffset'], encLMHash.getData())
+                    userChanged = True
+            
+            if newNTHash != b'':
+                encNTHash['Hash'] = self.__encryptHash(rid, newNTHash, encNTHash['Salt'], NTPASSWORD, newStyle)
+                if userAccount['NTHashLength'] != len(encNTHash.getData()):
+                    LOG.error("Mistaching NT lengths received!")
+                    LOG.info("User probably has an empty password. Unable to set new NT hash.")
+                    LOG.debug(f"Received: {userAccount['NTHashLength']} - Expected: {len(encNTHash.getData())}")
+                    # Missing NT data *is* a failure scenario, return
+                    return
+                userAccount['Data'] = self.__replaceValue(V, userAccount['NTHashOffset'], encNTHash.getData())
+                userChanged = True
+            
+            if lmHash == b'':
+                lmHash = ntlm.LMOWFv1('','')
+            if ntHash == b'':
+                ntHash = ntlm.NTOWFv1('','')
+            
+            LOG.info("Previous user hash: %s:%d:%s:%s:::" % (userName, rid, hexlify(lmHash).decode('utf-8'), hexlify(ntHash).decode('utf-8')))
+
+            if userChanged:
+                if self.setValue(ntpath.join(usersKey,_rid,'V'), userAccount.getData()) is None:
+                    LOG.error('Failed to write new user hash to SAM hive.')
+                    return
+            else:
+                LOG.info("Unable to change user hash, please ensure the target user already has a password set.")
+            
+            if newLMHash == b'':
+                newLMHash = ntlm.LMOWFv1('', '')
+            if newNTHash == b'':
+                newNTHash = ntlm.NTOWFv1('', '')
+            
+            answer = "%s:%s:%s:%s:::" % (userName, rid, hexlify(newLMHash).decode('utf-8'), hexlify(newNTHash).decode('utf-8'))
+
             self.__itemsFound[rid] = answer
             self.__perSecretCallback(answer)
 
@@ -2057,7 +2394,7 @@ class NTDSHashes:
         )
 
     def __init__(self, ntdsFile, bootKey, isRemote=False, history=False, noLMHash=True, remoteOps=None,
-                 useVSSMethod=False, justNTLM=False, pwdLastSet=False, resumeSession=None, outputFileName=None,
+                 useVSSMethod=False, remoteSSMethodWMINTDS=False, justNTLM=False, pwdLastSet=False, resumeSession=None, outputFileName=None,
                  justUser=None, skipUser=None,ldapFilter=None, printUserStatus=False,
                  perSecretCallback = lambda secretType, secret : _print_helper(secret),
                  resumeSessionMgr=ResumeSessionMgrInFile):
@@ -2066,6 +2403,7 @@ class NTDSHashes:
         self.__history = history
         self.__noLMHash = noLMHash
         self.__useVSSMethod = useVSSMethod
+        self.__remoteSSMethodWMINTDS = remoteSSMethodWMINTDS
         self.__remoteOps = remoteOps
         self.__pwdLastSet = pwdLastSet
         self.__printUserStatus = printUserStatus
@@ -2208,7 +2546,7 @@ class NTDSHashes:
         # This is based on [MS-SAMR] 2.2.10 Supplemental Credentials Structures
         haveInfo = False
         LOG.debug('Entering NTDSHashes.__decryptSupplementalInfo')
-        if self.__useVSSMethod is True:
+        if self.__useVSSMethod is True or self.__remoteSSMethodWMINTDS is True:
             if record[self.NAME_TO_INTERNAL['supplementalCredentials']] is not None:
                 if len(unhexlify(record[self.NAME_TO_INTERNAL['supplementalCredentials']])) > 24:
                     if record[self.NAME_TO_INTERNAL['userPrincipalName']] is not None:
@@ -2324,7 +2662,7 @@ class NTDSHashes:
 
     def __decryptHash(self, record, prefixTable=None, outputFile=None):
         LOG.debug('Entering NTDSHashes.__decryptHash')
-        if self.__useVSSMethod is True:
+        if self.__useVSSMethod is True or self.__remoteSSMethodWMINTDS is True:
             LOG.debug('Decrypting hash for user: %s' % record[self.NAME_TO_INTERNAL['name']])
 
             sid = SAMR_RPC_SID(unhexlify(record[self.NAME_TO_INTERNAL['objectSid']]))
@@ -2573,9 +2911,9 @@ class NTDSHashes:
             else:
                 skipUsers = self.__skipUser.split(',')
         
-        if self.__useVSSMethod is True:
+        if self.__useVSSMethod is True or self.__remoteSSMethodWMINTDS is True:
             if self.__NTDS is None:
-                # No NTDS.dit file provided and were asked to use VSS
+                # No NTDS.dit file provided and were asked to use VSS or Shadow Snapshot Method via WMI
                 return
         else:
             if self.__NTDS is None:
@@ -2614,7 +2952,7 @@ class NTDSHashes:
                     clearTextOutputFile = openFile(self.__outputFileName+'.ntds.cleartext',mode)
 
             LOG.info('Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)')
-            if self.__useVSSMethod:
+            if self.__useVSSMethod or self.__remoteSSMethodWMINTDS:
                 # We start getting rows from the table aiming at reaching
                 # the pekList. If we find users records we stored them
                 # in a temp list for later process.
@@ -2751,7 +3089,7 @@ class NTDSHashes:
                             else:
                                 LOG.warning('DRSCrackNames returned %d items for user %s, skipping' % (
                                             crackedName['pmsgOut']['V1']['pResult']['cItems'], user)
-)
+                                )
                         #userRecord.dump()
                         replyVersion = 'V%d' % userRecord['pdwOutVersion']
                         if userRecord['pmsgOut'][replyVersion]['cNumObjects'] == 0:
@@ -2846,7 +3184,7 @@ class NTDSHashes:
             LOG.debug("Finished processing and printing user's hashes, now printing supplemental information")
             # Now we'll print the Kerberos keys. So we don't mix things up in the output.
             if len(self.__kerberosKeys) > 0:
-                if self.__useVSSMethod is True:
+                if self.__useVSSMethod is True or self.__remoteSSMethodWMINTDS is True:
                     LOG.info('Kerberos keys from %s ' % self.__NTDS)
                 else:
                     LOG.info('Kerberos keys grabbed')
@@ -2856,7 +3194,7 @@ class NTDSHashes:
 
             # And finally the cleartext pwds
             if len(self.__clearTextPwds) > 0:
-                if self.__useVSSMethod is True:
+                if self.__useVSSMethod is True or self.__remoteSSMethodWMINTDS is True:
                     LOG.info('ClearText password from %s ' % self.__NTDS)
                 else:
                     LOG.info('ClearText passwords grabbed')
@@ -2896,7 +3234,7 @@ class LocalOperations:
         # Local Version whenever we are given the files directly
         bootKey = b''
         tmpKey = b''
-        winreg = winregistry.Registry(self.__systemHive, False)
+        winreg = winregistry.get_registry_parser(self.__systemHive, False)
         # We gotta find out the Current Control Set
         currentControlSet = winreg.getValue('\\Select\\Current')[1]
         currentControlSet = "ControlSet%03d" % currentControlSet
@@ -2920,7 +3258,7 @@ class LocalOperations:
 
     def checkNoLMHashPolicy(self):
         LOG.debug('Checking NoLMHash Policy')
-        winreg = winregistry.Registry(self.__systemHive, False)
+        winreg = winregistry.get_registry_parser(self.__systemHive, False)
         # We gotta find out the Current Control Set
         currentControlSet = winreg.getValue('\\Select\\Current')[1]
         currentControlSet = "ControlSet%03d" % currentControlSet
