@@ -13,7 +13,7 @@
 #   Python script to read and manage the Discretionary Access Control List of an object
 #
 # Authors:
-#   Fabrizzio Bridi
+#   Fabrizzio Bridi @Fabrizzio53
 
 import argparse
 import binascii
@@ -68,6 +68,8 @@ class OUChange(object):
         cnf.basepath = None
         self.domain_dumper = ldapdomaindump.domainDumper(self.ldap_server, self.ldap_session, cnf)
 
+        self.__old_target_dn = self.__target_dn
+
         if self.__target_dn == None:
 
             resp = self.ldap_session.search(self.domain_dumper.root, f'(sAMAccountName={self.__target})', attributes=['*'])
@@ -84,9 +86,7 @@ class OUChange(object):
                     return False
             else:
                 print(f"[-] Search failed {self.ldap_session.last_error}")    
-                return False
-
-        self.__old_target_dn = self.__target_dn
+                return False      
 
         parsed_cn = self.set_correct_cn_format(self.__old_target_dn)
 
