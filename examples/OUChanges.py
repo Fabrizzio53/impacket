@@ -16,29 +16,17 @@
 #   Fabrizzio Bridi @Fabrizzio53
 
 import argparse
-import binascii
-import codecs
-import json
 import logging
-import os
 import sys
 import traceback
-import datetime
 
 import ldap3
 import ldapdomaindump
-from enum import Enum
-from ldap3.protocol.formatters.formatters import format_sid
 from ldap3.utils.dn import parse_dn
+from ldap3.utils.conv import escape_filter_chars 
 
 from impacket import version
-from impacket.examples import logger, utils
-from impacket.ldap import ldaptypes
-from impacket.msada_guids import SCHEMA_OBJECTS, EXTENDED_RIGHTS
-from ldap3.utils.conv import escape_filter_chars
-from ldap3.protocol.microsoft import security_descriptor_control
-from impacket.uuid import string_to_bin, bin_to_string
-
+from impacket.examples import logger
 from impacket.examples.utils import init_ldap_session, parse_identity
 
 class OUChange(object):
