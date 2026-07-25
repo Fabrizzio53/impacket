@@ -31,15 +31,14 @@ from impacket.examples.utils import init_ldap_session, parse_identity
 
 class OUChange(object):
 
-    def set_correct_cn_format(self,old_target_dn):
-
-        parsed_dn = parse_dn(self.__old_target_dn)
-        cn_only = [attr_value[1] for attr_value in parsed_dn if attr_value[0].lower() == 'cn']
-
-        return ','.join([f"CN={cn}" for cn in cn_only])
+    def get_rdn(self, dn):
+        # Extracts just the object's relative name (e.g., 'CN=celia')
+        parsed_dn = parse_dn(dn)
+        if parsed_dn:
+            attr, val, _ = parsed_dn[0]
+            return f"{attr}={val}"
+        return dn.split(',')[0]
                
-
-
     def __init__(self, ldap_server, ldap_session, args):
 
         self.ldap_server = ldap_server
@@ -76,17 +75,14 @@ class OUChange(object):
                 print(f"[-] Search failed {self.ldap_session.last_error}")    
                 return False      
 
-        parsed_cn = self.set_correct_cn_format(self.__old_target_dn)
+        parsed_cn = self.get_rdn(self.__old_target_dn)
 
-        print(f"[!] trying to move {self.__target} to {self.__destination_ou_dn}")
+        print(f"[!] trying to move {self.__old_target_dn} to {self.__destination_ou_dn}")
 
-        if self.ldap_session.modify_dn(self.__old_target_dn,parsed_cn, new_superior=self.__destination_ou_dn):
-
+        if self.ldap_session.modify_dn(self.__old_target_dn, parsed_cn, new_superior=self.__destination_ou_dn):
             print(f'[+] Success, the user got changed to the new OU {self.__destination_ou_dn}')
-
         else:
-
-            print(f'[-] Could not change {self.__target} to the new OU: {self.ldap_session.result["description"]}')   
+            print(f'[-] Could not change {self.__target} to the new OU: {self.ldap_session.result["description"]}')
 
 
 def parse_args():
